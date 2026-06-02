@@ -1,0 +1,16 @@
+# Build output
+target/
+dist/
+node_modules/
+*.war
+*.jar
+
+# Logs / runtime
+*.log
+/tmp/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
