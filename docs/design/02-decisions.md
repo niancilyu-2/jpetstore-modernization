@@ -93,9 +93,46 @@ from host toolchain quirks. Full root causes in
 
 ---
 
-## Open decisions (still to be made)
+## ADR-007 — Reuse the legacy persistence layer by vendoring with a provenance check
 
-- DTO field naming / whether any legacy JSON shape must be matched
-- REST error-handling conventions
-- Reverse-proxy host port (sandbox `:80`/`:8080` are occupied)
-- How the Boot service consumes the legacy mappers from the submodule
+**Decision:** Copy the catalog-relevant files (the `Category`/`Product`/`Item`
+domain classes, the three mapper interfaces and their XML, and `CatalogService`)
+verbatim into the Boot service, keeping their original packages. Add a
+**provenance test** asserting each copy is byte-identical to its `upstream/`
+counterpart at the pinned commit.
+
+**Why:** The mappers and service are framework-agnostic (no Stripes imports), so
+they are genuinely reusable. Vendoring is robust and realistic, and the provenance
+test keeps "untouched reuse" honest — drift fails the build. It does not couple our
+build to the submodule's directory layout.
+
+**Alternatives rejected:**
+- *Reference upstream sources in the build* (point Maven at `upstream/` source
+  files). Purest "no copy" story, but brittle — couples our build to upstream's
+  internal layout.
+- *Rewrite the persistence layer fresh.* Cleanest long-term separation and a
+  common real-world endpoint, but loses the "core survives untouched" lesson and is
+  the most work for Phase 1.
+
+---
+
+## ADR-008 — Keep legacy at `/jpetstore/`; new catalog canonical at `/catalog/`
+
+**Decision:** The reverse proxy sends `/api/catalog/*` and `/catalog/*` to the new
+stack and everything else to the legacy WAR at its existing `/jpetstore/` context.
+nginx is exposed on host port **8888** (sandbox `:80`/`:8080` are occupied).
+
+**Why:** Rewriting legacy URLs in nginx adds complexity with no Phase-1 benefit.
+Making the new catalog canonical at a distinct path keeps the cutover boundary
+obvious and testable.
+
+---
+
+## Resolved — the remaining open decisions
+
+| Was open | Resolved as |
+| --- | --- |
+| DTO field naming / match a legacy JSON shape? | No legacy JSON exists (JSP/HTML). Clean DTOs; drop `unitCost`/`supplierId` (ADR in `01-architecture.md`, DTO contract). |
+| REST error-handling conventions | `@RestControllerAdvice`, JSON error body; 404 not-found, 400 blank-search. |
+| Reverse-proxy host port | nginx on host **8888** (ADR-008). |
+| How the Boot service consumes the mappers | Vendor with provenance check (ADR-007). |

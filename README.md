@@ -42,8 +42,9 @@ upstream/           # the legacy app, as a pinned git submodule (READ-ONLY refer
 
 ## Status
 
-Design phase. See [`docs/design/`](docs/design/) for the current design, the
-decisions made so far, and the open questions still being worked through.
+Design complete for Phase 1 (catalog slice); implementation planning next. See
+[`docs/design/`](docs/design/) for the architecture, the decision log, and the
+problem/learning record.
 
 ## Documentation index
 

@@ -76,15 +76,93 @@ DBs merely let us defer it for a read-only slice.
 - **Upstream is read-only.** It is a pinned submodule; the new stack consumes it,
   never edits it.
 
-## Open design questions (not yet settled)
+## Module layout & build
 
-These are the design sections still to be worked through and recorded:
+```
+services/catalog/                 # Spring Boot 3, Maven, Java 21
+  src/main/java/org/mybatis/jpetstore/
+    domain/    Category, Product, Item        # VENDORED from upstream@1478177
+    mapper/    Category/Item/ProductMapper    # VENDORED
+    service/   CatalogService                 # VENDORED
+    catalog/   CatalogController, dto/, error/, Application.java   # NEW
+  src/main/resources/
+    mapper/*.xml                              # VENDORED (MyBatis XML)
+    database/*.sql                            # VENDORED seed for embedded HSQLDB
+    application.yml
+  src/test/java/...                           # provenance + mapper + web tests
+frontend/catalog/                 # Astro (SSR)
+docker/
+  legacy.Dockerfile               # run the unmodified legacy app
+  compose.yaml                    # legacy + catalog-api + catalog-web + nginx
+  nginx/default.conf              # the strangler routing
+```
 
-- Exact DTO shapes and JSON field names (must the Astro app match any legacy shape?)
-- Error handling / status-code conventions for the REST layer
-- Testing strategy: how the existing upstream tests pin behavior, plus the
-  Playwright/e2e cutover assertion
-- Reverse-proxy host port (host `:80` and `:8080` are already occupied in the
-  dev sandbox — see the problem log)
-- How the Boot service consumes mappers from the submodule (depend on the built
-  artifact vs. import sources)
+Vendored files keep their `org.mybatis.jpetstore.*` packages so `CatalogService`
+and the mappers wire up unchanged. A **provenance test** asserts each vendored
+file is byte-identical to its `upstream/` counterpart; if the upstream pin moves
+and a file drifts, the test fails loudly. Build uses Maven +
+`mybatis-spring-boot-starter`, matching the upstream idiom. See ADR-007 in
+[`02-decisions.md`](02-decisions.md).
+
+## DTO contract
+
+The legacy serves HTML (JSP), so **there is no existing JSON contract** — we
+define it. DTOs are a deliberate projection that hides internal fields:
+
+```jsonc
+CategoryDto { "id", "name", "description" }
+ProductDto  { "id", "categoryId", "name", "description" }
+ItemDto     { "id", "productId", "listPrice", "quantity",   // quantity = inventory in stock
+              "status", "attributes": [..], "product": { "id", "name" } }
+              // DROPPED: unitCost, supplierId  <- internal/cost data, never exposed
+```
+
+`listPrice` (a `BigDecimal`) serializes as a JSON number. The dropped
+`unitCost`/`supplierId` are a teaching artifact: a web-layer test asserts they
+never appear in any response. This is the decoupling lesson — the wire contract is
+chosen, not inherited from the persistence shape.
+
+## REST API + error handling
+
+| Method & path | Maps to (`CatalogService`) | Notes |
+| --- | --- | --- |
+| `GET /api/catalog/categories` | `getCategoryList()` | homepage payload |
+| `GET /api/catalog/categories/{id}` | `getCategory()` | 404 if missing |
+| `GET /api/catalog/categories/{id}/products` | `getProductListByCategory()` | |
+| `GET /api/catalog/products/{id}` | `getProduct()` | 404 if missing |
+| `GET /api/catalog/products/{id}/items` | `getItemListByProduct()` | |
+| `GET /api/catalog/items/{id}` | `getItem()` | 404 if missing |
+| `GET /api/catalog/products?q=…` | `searchProductList()` | blank `q` -> 400 (mirrors legacy "enter a keyword") |
+| `GET /api/catalog/health` | — | liveness |
+
+A single `@RestControllerAdvice` returns a small JSON error body
+`{ status, error, message, path }`. A not-found maps to 404; a blank search maps
+to 400.
+
+## Testing strategy
+
+1. **Provenance test** — vendored files are byte-identical to the upstream pin.
+2. **Mapper tests** — MyBatis against embedded HSQLDB seeded from the vendored
+   SQL (ported from upstream's catalog mapper tests).
+3. **Web-layer tests (MockMvc)** — status codes, the 404/400 paths, and the
+   projection assertion (`unitCost`/`supplierId` absent from every response).
+4. **E2E cutover (Playwright, through nginx)** — the marquee check: browsing
+   `/catalog/...` is served by the new stack, while a legacy path still hits the
+   legacy WAR. "Cutover IS verification."
+
+## Deployment & strangler routing
+
+`docker/compose.yaml` runs four services; only nginx is exposed on the host, at
+port **8888** (host `:80` and `:8080` are occupied in the dev sandbox — see the
+problem log).
+
+```nginx
+location /api/catalog/  { proxy_pass http://catalog-api:8081; }   # new REST
+location /catalog/      { proxy_pass http://catalog-web:4321; }   # new Astro UI
+location /              { proxy_pass http://legacy:8080; }        # everything else, untouched
+```
+
+The legacy app keeps its existing `/jpetstore/` context; the new catalog is
+canonical at `/catalog/`. We deliberately do **not** rewrite legacy URLs in nginx
+— that adds complexity with no Phase-1 benefit. Each app keeps its own embedded
+HSQLDB (read-only slice -> safe; see ADR-005).
